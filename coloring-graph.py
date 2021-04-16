@@ -27,37 +27,34 @@ edges = spark.read.options(delimiter="|").csv("/vagrant/csv/edges.csv", header=T
 reverse_edges = edges.selectExpr("dst as src", "src as dst")
 edges = edges.union(reverse_edges)
 
-# add default values of local maximal first alg on vertices
-# vertices = (
-#     vertices.withColumn("value", F.lit(-1))
-#     .withColumn("maxima", F.lit(False))
-#     .withColumn("step", F.lit(0))
-# )
-
-def new_value(id, value, maxima, step):
-    return {"id": id, "value": value, "maxima": maxima, "step": step}
+# Creates the local maxima value
+def local_max_value(id, value, maxima, step):
+    return {"id": id, "color": value, "maxima": maxima, "step": step}
 
 
-vertice_new_value = types.StructType(
+local_max_value_type = types.StructType(
     [
-        types.StructField("id", types.StringType()),
-        types.StructField("value", types.IntegerType()),
+        types.StructField("id", types.IntegerType()),
+        types.StructField("color", types.IntegerType()),
         types.StructField("maxima", types.BooleanType()),
         types.StructField("step", types.IntegerType()),
     ]
 )
-vertice_new_value_udf = F.udf(new_value, vertice_new_value)
+local_max_value_type_udf = F.udf(local_max_value, local_max_value_type)
 
-# Add LocalMaximaValue of each node
-# vertices = vertices.withColumn(
-#     "new_value",
-#     vertice_new_value_udf(
-#         vertices["id"], vertices["value"], vertices["maxima"], vertices["step"]
-#     ),
-# )
+# Add localMaxima of each node
+# LocalMaxima consists of a dictionary with following structure
+# {
+#     "id" => The id of the vertices,
+#     "color" => The color of the vertices. Default value -1 (no color),
+#     "maxima" => This variable indicates if the vertice is the maxima of its neighborhood
+#     "step" => The Step of the algorithm
+# }
 vertices = vertices.withColumn(
-    "localMaximaValue",
-    vertice_new_value_udf(vertices["id"], F.lit(-1), F.lit(False), F.lit(1)),
+    "localMaxima",
+    local_max_value_type_udf(
+        vertices["id"].cast("int"), F.lit(-1), F.lit(False), F.lit(1)
+    ),
 )
 
 cached_vertices = AM.getCachedDataFrame(vertices)
@@ -67,3 +64,67 @@ g = GraphFrame(cached_vertices, edges)
 g.vertices.show()
 g.edges.show()
 g.degrees.show()
+
+# UDF for preserving the local maxima between those received by all neighbors.
+def greater_local_max_value(local_max_value_neighbors):
+    max_id = -1
+    color = -1
+    maxima = False
+    step = -1
+    for neighbor in local_max_value_neighbors:
+        if neighbor.maxima == False and neighbor.id > max_id:
+            max_id = neighbor.id
+            color = neighbor.color
+            maxima = neighbor.maxima
+            step = neighbor.step
+    return {"id": max_id, "color": color, "maxima": maxima, "step": step}
+
+
+greater_local_max_value_udf = F.udf(greater_local_max_value, local_max_value_type)
+
+# UDF for comparing local maxima between the old one and the new one.
+def compare_local_max_value(old_local_max, new_local_max):
+
+    if old_local_max.maxima == True:
+        return {
+            "id": old_local_max.id,
+            "color": old_local_max.color,
+            "maxima": old_local_max.maxima,
+            "step": (old_local_max.step + 1),
+        }
+
+    maxima = False
+    color = old_local_max.color
+    step = old_local_max.step + 1
+    if new_local_max.id < old_local_max.id:
+        maxima = True
+        color = old_local_max.step
+
+    return {"id": old_local_max.id, "color": color, "maxima": maxima, "step": step}
+
+
+compare_local_max_value_udf = F.udf(compare_local_max_value, local_max_value_type)
+
+max_iterations = 5
+for _ in range(max_iterations):
+    aggregates = g.aggregateMessages(
+        F.collect_set(AM.msg).alias("agg"), sendToDst=AM.src["localMaxima"]
+    )
+    res = aggregates.withColumn(
+        "newlocalMaxima", greater_local_max_value_udf("agg")
+    ).drop("agg")
+    new_vertices = (
+        g.vertices.join(res, on="id", how="left_outer")
+        .withColumnRenamed("localMaxima", "oldlocalMaxima")
+        .withColumn(
+            "localMaxima",
+            compare_local_max_value_udf(
+                F.col("oldlocalMaxima"), F.col("newlocalMaxima")
+            ),
+        )
+        .drop("oldlocalMaxima")
+        .drop("newlocalMaxima")
+    )
+    cached_new_vertices = AM.getCachedDataFrame(new_vertices)
+    g = GraphFrame(cached_new_vertices, g.edges)
+    g.vertices.show()
