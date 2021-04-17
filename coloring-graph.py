@@ -1,10 +1,12 @@
 """
-Simple example using aggregateMessages.
+Simple example using aggregateMessages library of GraphX componet which is part of the ecosystem of Apache Spark framework
 
-The goal is to find the minimum rating of a player (node) by sending the neighbors
-the currently known minimum rating by each node.
+The goal is to use the minimum number of colors to properly color a connected graph. More info here: https://en.wikipedia.org/wiki/Graph_coloring
 
-Run with: ~/spark-2.4.7-bin-hadoop2.7/bin/spark-submit --packages graphframes:graphframes:0.7.0-spark2.3-s_2.11  /vagrant/coloring-graph.py
+In this example used Local Maxima First algorithm (a Pregel algorithm) to associate each node of graph with a number (starting from 1) representing the color that should be used.
+
+Run code:
+~/spark-2.4.7-bin-hadoop2.7/bin/spark-submit --packages graphframes:graphframes:0.7.0-spark2.3-s_2.11  /vagrant/coloring-graph.py
 
 """
 
@@ -19,7 +21,7 @@ from pyspark.sql import functions as F
 
 
 spark = SparkSession.builder.appName("colorign-graph-app").getOrCreate()
-
+# Reading vertices and edges from /csv folder
 vertices = spark.read.csv("/vagrant/csv/vertices.csv", header=True)
 edges = spark.read.options(delimiter="|").csv("/vagrant/csv/edges.csv", header=True)
 
@@ -42,8 +44,8 @@ local_max_value_type = types.StructType(
 )
 local_max_value_type_udf = F.udf(local_max_value, local_max_value_type)
 
-# Add localMaxima of each node
-# LocalMaxima consists of a dictionary with following structure
+# Create localMaxima of each node
+# LocalMaxima consists of a dictionary with the following structure
 # {
 #     "id" => The id of the vertices,
 #     "color" => The color of the vertices. Default value -1 (no color),
@@ -57,15 +59,14 @@ vertices = vertices.withColumn(
     ),
 )
 
-cached_vertices = AM.getCachedDataFrame(vertices)
-
 # Create and print information on the respective GraphFrame
+cached_vertices = AM.getCachedDataFrame(vertices)
 g = GraphFrame(cached_vertices, edges)
 g.vertices.show()
 g.edges.show()
 g.degrees.show()
 
-# UDF for preserving the local maxima between those received by all neighbors.
+# UDF for the neighbor with the greater local maxima value from all neighbors of each node.
 def greater_local_max_value(local_max_value_neighbors):
     max_id = -1
     color = -1
@@ -105,8 +106,7 @@ def compare_local_max_value(old_local_max, new_local_max):
 
 compare_local_max_value_udf = F.udf(compare_local_max_value, local_max_value_type)
 
-max_iterations = 5
-for _ in range(max_iterations):
+while True:
     aggregates = g.aggregateMessages(
         F.collect_set(AM.msg).alias("agg"), sendToDst=AM.src["localMaxima"]
     )
@@ -128,3 +128,19 @@ for _ in range(max_iterations):
     cached_new_vertices = AM.getCachedDataFrame(new_vertices)
     g = GraphFrame(cached_new_vertices, g.edges)
     g.vertices.show()
+    existUncompletedVertices = (
+        False
+        if (
+            cached_new_vertices.select(
+                F.col("localMaxima").getItem("maxima").alias(str("maxima"))
+            )
+            .filter(F.col("maxima").contains(False))
+            .count()
+        )
+        == 0
+        else True
+    )
+
+    if existUncompletedVertices != True:
+        print("Local Maxima First Coloring Algorithm Finished")
+        break
