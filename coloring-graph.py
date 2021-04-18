@@ -1,9 +1,10 @@
 """
-Simple example using aggregateMessages library of GraphX componet which is part of the ecosystem of Apache Spark framework
+Simple example using aggregateMessages of GraphFrames (a graph processing library) which is part of Apache Spark framework.
 
-The goal is to use the minimum number of colors to properly color a connected graph. More info here: https://en.wikipedia.org/wiki/Graph_coloring
+The goal is to use the minimum number of colors to properly color a connected graph using different color between neighbors.
+More information can be found here: https://en.wikipedia.org/wiki/Graph_coloring
 
-In this example used Local Maxima First algorithm (a Pregel algorithm) to associate each node of graph with a number (starting from 1) representing the color that should be used.
+In this example used Local Maxima First algorithm (a Pregel-like algorithm) to associate each node of graph with a number (starting from 1) representing the color that should be used.
 
 Run code:
 ~/spark-2.4.7-bin-hadoop2.7/bin/spark-submit --packages graphframes:graphframes:0.7.0-spark2.3-s_2.11  /vagrant/coloring-graph.py
@@ -106,13 +107,17 @@ def compare_local_max_value(old_local_max, new_local_max):
 
 compare_local_max_value_udf = F.udf(compare_local_max_value, local_max_value_type)
 
+# Local Maxima First Algorithm
 while True:
+    # Aggregates messages from the neighbors.
     aggregates = g.aggregateMessages(
         F.collect_set(AM.msg).alias("agg"), sendToDst=AM.src["localMaxima"]
     )
     res = aggregates.withColumn(
         "newlocalMaxima", greater_local_max_value_udf("agg")
     ).drop("agg")
+
+    # Aggregates and Joins vertices leveraging localMaxima values
     new_vertices = (
         g.vertices.join(res, on="id", how="left_outer")
         .withColumnRenamed("localMaxima", "oldlocalMaxima")
@@ -128,7 +133,10 @@ while True:
     cached_new_vertices = AM.getCachedDataFrame(new_vertices)
     g = GraphFrame(cached_new_vertices, g.edges)
     g.vertices.show()
-    existUncompletedVertices = (
+
+    # Vote-To-Halt step.
+    # If all vertices have been colored the algorithm stops otherwise continues for another round.
+    existUncoloredVertices = (
         False
         if (
             cached_new_vertices.select(
@@ -141,6 +149,6 @@ while True:
         else True
     )
 
-    if existUncompletedVertices != True:
+    if existUncoloredVertices != True:
         print("Local Maxima First Coloring Algorithm Finished")
         break
