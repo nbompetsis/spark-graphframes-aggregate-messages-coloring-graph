@@ -19,18 +19,30 @@ from graphframes.lib import AggregateMessages as AM
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import SQLContext, functions as sqlfunctions, types
 from pyspark.sql import functions as F
+import argparse
 
+inputVertices = "/vagrant/csv/vertices.csv"
+inputEdges = "/vagrant/csv/edges.csv"
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-v", help="Vertices csv file")
+parser.add_argument("-e", help="Edges csv file")
+
+args = parser.parse_args()
+if args.v and args.e:
+    inputVertices = args.v
+    inputEdges = args.e
 
 spark = SparkSession.builder.appName("colorign-graph-app").getOrCreate()
-# Reading vertices and edges from /csv folder
-vertices = spark.read.csv("/vagrant/csv/vertices.csv", header=True)
-edges = spark.read.options(delimiter="|").csv("/vagrant/csv/edges.csv", header=True)
+# Reading vertices and edges csv files
+vertices = spark.read.csv(inputVertices, header=True)
+edges = spark.read.options(delimiter="|").csv(inputEdges, header=True)
 
 # Fix graph to be undirected
 reverse_edges = edges.selectExpr("dst as src", "src as dst")
 edges = edges.union(reverse_edges)
 
-# Creates the local maxima value
+# Create local maxima value
 def local_max_value(id, value, maxima, step):
     return {"id": id, "color": value, "maxima": maxima, "step": step}
 
@@ -48,9 +60,9 @@ local_max_value_type_udf = F.udf(local_max_value, local_max_value_type)
 # Create localMaxima of each node
 # LocalMaxima consists of a dictionary with the following structure
 # {
-#     "id" => The id of the vertices,
-#     "color" => The color of the vertices. Default value -1 (no color),
-#     "maxima" => This variable indicates if the vertice is the maxima of its neighborhood
+#     "id" => The id of the node,
+#     "color" => The color of the node. Default value -1 (no color),
+#     "maxima" => Indicates if the node is the maxima of its neighborhood
 #     "step" => The Step of the algorithm
 # }
 vertices = vertices.withColumn(
@@ -67,7 +79,7 @@ g.vertices.show()
 g.edges.show()
 g.degrees.show()
 
-# UDF for the neighbor with the greater local maxima value from all neighbors of each node.
+# UDF for the neighbor with the greater local maxima value of each node.
 def greater_local_max_value(local_max_value_neighbors):
     max_id = -1
     color = -1
@@ -109,7 +121,7 @@ compare_local_max_value_udf = F.udf(compare_local_max_value, local_max_value_typ
 
 # Local Maxima First Algorithm
 while True:
-    # Aggregates messages from the neighbors.
+    # Aggregate messages from the neighbors.
     aggregates = g.aggregateMessages(
         F.collect_set(AM.msg).alias("agg"), sendToDst=AM.src["localMaxima"]
     )
@@ -117,7 +129,7 @@ while True:
         "newlocalMaxima", greater_local_max_value_udf("agg")
     ).drop("agg")
 
-    # Aggregates and Joins vertices leveraging localMaxima values
+    # Aggregate and Join vertices leveraging localMaxima values
     new_vertices = (
         g.vertices.join(res, on="id", how="left_outer")
         .withColumnRenamed("localMaxima", "oldlocalMaxima")
@@ -150,5 +162,5 @@ while True:
     )
 
     if existUncoloredVertices != True:
-        print("Local Maxima First Coloring Algorithm Finished")
+        print("Local Maxima First Algorithm Completed")
         break
